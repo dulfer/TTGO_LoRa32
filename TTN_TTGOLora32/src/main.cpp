@@ -3,6 +3,9 @@
 // Based on examples from https://github.com/matthijskooijman/arduino-lmic
 // Copyright (c) 2015 Thomas Telkamp and Matthijs Kooijman
 
+// 20180209 - added support for selecting spreading factor using PRG button on TTGO 
+//            display of current frequency and SF on OLED
+
 #include <Arduino.h>
 #include "lmic.h"
 #include <hal/hal.h>
@@ -16,6 +19,8 @@
 #define OLED_RESET 16
 #define OLED_SDA 4
 #define OLED_SCL 15
+
+#define BUTTON_GPIO 0  // define the button GPIO port 
 
 unsigned int counter = 0;
 
@@ -50,6 +55,24 @@ const lmic_pinmap lmic_pins = {
     .dio = {26, 33, 32}  // Pins for the Heltec ESP32 Lora board/ TTGO Lora32 with 3D metal antenna
 };
 
+// Defining lookup table for translating enum to SF label
+// there must be a more elegant way, but for now it works
+// enum _dr_eu868_t { DR_SF12=0, DR_SF11, DR_SF10, DR_SF9, DR_SF8, DR_SF7, DR_SF7B, DR_FSK, DR_NONE };}
+static String sf_table[9] = {
+    "SF12",
+    "SF11",
+    "SF10",
+    "SF9",
+    "SF8",
+    "SF7",
+    "*SF7B",
+    "*FSK",
+    "*NONE"
+};
+
+// set initial spreading factor index (3 = SF9)
+static byte currentSF = 3;
+
 void do_send(osjob_t* j){
     // Payload to send (uplink)
     static uint8_t message[] = "Hello World!";
@@ -59,13 +82,14 @@ void do_send(osjob_t* j){
         Serial.println(F("OP_TXRXPEND, not sending"));
     } else {
         // Prepare upstream data transmission at the next possible time.
-        LMIC_setTxData2(1, message, sizeof(message)-1, 0);
-        Serial.println(F("Sending uplink packet..."));
-        digitalWrite(LEDPIN, HIGH);
         display.clear();
-        display.drawString (0, 0, "Sending uplink packet...");
+        display.drawString (0, 0, "Packet queued...");
+        display.drawString (0, 12, String(LMIC.freq) + " Mhz");
+        display.drawString (0, 24, sf_table[currentSF]);
+
         display.drawString (0, 50, String (++counter));
         display.display ();
+        Serial.println(F("Sending uplink packet..."));
     }
     // Next TX is scheduled after TX_COMPLETE event.
 }
@@ -73,7 +97,10 @@ void do_send(osjob_t* j){
 void onEvent (ev_t ev) {
     if (ev == EV_TXCOMPLETE) {
         display.clear();
+        display.setFont (ArialMT_Plain_10);
         display.drawString (0, 0, "EV_TXCOMPLETE event!");
+        display.drawString (0, 12, String(LMIC.freq) + " Mhz");
+        display.drawString (0, 24, sf_table[currentSF]);
 
 
         Serial.println(F("EV_TXCOMPLETE (includes waiting for RX windows)"));
@@ -89,11 +116,11 @@ void onEvent (ev_t ev) {
           Serial.write(LMIC.frame+LMIC.dataBeg, LMIC.dataLen);
           Serial.println();
 
-          display.drawString (0, 20, "Received DATA.");
+          display.drawString (0, 30, "Received DATA.");
           for ( i = 0 ; i < LMIC.dataLen ; i++ )
             TTN_response[i] = LMIC.frame[LMIC.dataBeg+i];
           TTN_response[i] = 0;
-          display.drawString (0, 32, String(TTN_response));
+          display.drawString (0, 38, String(TTN_response));
         }
 
         // Schedule next transmission
@@ -138,6 +165,9 @@ void setup() {
 
     // Use the Blue pin to signal transmission.
     pinMode(LEDPIN,OUTPUT);
+    
+    // setup button
+    pinMode(BUTTON_GPIO, INPUT_PULLUP);
 
    // reset the OLED
    pinMode(OLED_RESET,OUTPUT);
@@ -188,17 +218,50 @@ void setup() {
     // Disable link check validation
     LMIC_setLinkCheckMode(0);
 
-    // TTN uses SF9 for its RX2 window.
-    LMIC.dn2Dr = DR_SF9;
+    // Setup SF (use static variable currentSF), TTN uses SF9 for its RX2 window.
+    LMIC.dn2Dr = static_cast<_dr_eu868_t>(currentSF);
 
     // Set data rate and transmit power for uplink (note: txpow seems to be ignored by the library)
     //LMIC_setDrTxpow(DR_SF11,14);
-    LMIC_setDrTxpow(DR_SF9,14);
+    LMIC_setDrTxpow(static_cast<_dr_eu868_t>(currentSF),14);
 
     // Start job
     do_send(&sendjob);
 }
 
+bool _btn_isreleased = true;
 void loop() {
     os_runloop_once();
+    
+    //detect button press and change SF
+    //TODO: take code out of loop routine
+    if (digitalRead(BUTTON_GPIO) == LOW && _btn_isreleased) {
+
+        _btn_isreleased = false;
+
+        currentSF++;
+        if (currentSF > 8) {
+            currentSF = 0;
+        }
+        // change SF
+        LMIC.dn2Dr = static_cast<_dr_eu868_t>(currentSF);
+
+        // Set data rate and transmit power for uplink (note: txpow seems to be ignored by the library)
+        //LMIC_setDrTxpow(DR_SF11,14);
+        LMIC_setDrTxpow(static_cast<_dr_eu868_t>(currentSF),14);
+
+        // debounce
+        delay(50);
+
+        display.clear();
+        display.setFont (ArialMT_Plain_10);
+        display.drawString (0, 0, "SF Changed");
+        display.setFont (ArialMT_Plain_16);
+        display.drawString (0, 12, sf_table[currentSF]);
+        display.display();
+
+    }
+
+    if (digitalRead(BUTTON_GPIO) == HIGH && !_btn_isreleased) { _btn_isreleased = true; }
+
 }
